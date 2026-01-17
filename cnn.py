@@ -1,15 +1,19 @@
+import os
 import torch
-import torch.nn.functional as F  # Parameterless functions, like (some) activation functions
-import torchvision.datasets as datasets  # Standard datasets
-import torchvision.transforms as transforms  # Transformations we can perform on our dataset for augmentation
-from torch import optim  # For optimizers like SGD, Adam, etc.
-from torch import nn  # All neural network modules
-from torch.utils.data import (
-    DataLoader,
-)  # Gives easier dataset managment by creating mini batches etc.
-from tqdm import tqdm  # For nice progress bar!
+import numpy as np
+import torch.nn.functional as F
+import torchvision.datasets as datasets
+import torchvision.transforms as transforms
+from torch import optim, nn
+from torch.utils.data import DataLoader
 
-# Simple CNN
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+
+# --- Model Architecture ---
 class CNN(nn.Module):
     def __init__(self, in_channels=1, num_classes=10):
         super(CNN, self).__init__()
@@ -38,55 +42,60 @@ class CNN(nn.Module):
         x = x.reshape(x.shape[0], -1)
         x = self.fc1(x)
         return x
-
-
+    
+    
 # Set device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_CACHED_MODEL = None
 
-# Hyperparameters
-in_channels = 1
-num_classes = 10
-learning_rate = 3e-4 # karpathy's constant
-batch_size = 64
-num_epochs = 3
+# Hyperparamenters
+IN_CHANNELS = 1
+NUM_CLASSES = 10
+LEARNING_RATE = 0.001
+BATCH_SIZE = 64
+NUM_EPOCHS = 3
 
-# Load Data
-train_dataset = datasets.MNIST(
-    root="dataset/", train=True, transform=transforms.ToTensor(), download=True
-)
-test_dataset = datasets.MNIST(
-    root="dataset/", train=False, transform=transforms.ToTensor(), download=True
-)
-train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=True)
+# Load data
+def load_mnist_data(batch_size=BATCH_SIZE):
+    train_dataset = datasets.MNIST( root="dataset/", train=True, transform=transforms.ToTensor(), download=True)
+    test_dataset = datasets.MNIST(root="dataset/", train=False, transform=transforms.ToTensor(), download=True)
+    
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
+    
+    return train_loader, test_loader
 
 # Initialize network
-model = CNN(in_channels=in_channels, num_classes=num_classes).to(device)
+def build_model(device=DEVICE):
+    return CNN(in_channels=IN_CHANNELS, num_classes=NUM_CLASSES).to(device)
 
-# Loss and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
 # Train Network
-for epoch in range(num_epochs):
-    for batch_idx, (data, targets) in enumerate(tqdm(train_loader)):
-        # Get data to cuda if possible
-        data = data.to(device=device)
-        targets = targets.to(device=device)
+def train_network(model, train_loader, device=DEVICE, num_epochs=NUM_EPOCHS):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-        # forward
-        scores = model(data)
-        loss = criterion(scores, targets)
+    model.train()
+    for epoch in range(num_epochs):
+        for data, targets in train_loader:
+            # Get data to cuda if possible
+            data = data.to(device=device)
+            targets = targets.to(device=device)
 
-        # backward
-        optimizer.zero_grad()
-        loss.backward()
+            # forward
+            scores = model(data)
+            loss = criterion(scores, targets)
 
-        # gradient descent or adam step
-        optimizer.step()
+            # backward
+            optimizer.zero_grad()
+            loss.backward()
+            
+            # gradient descent or adam step
+            optimizer.step()
+
 
 # Check accuracy on training & test to see how good our model
-def check_accuracy(loader, model):
+def check_accuracy(loader, model, device=DEVICE):
     num_correct = 0
     num_samples = 0
     model.eval()
@@ -98,12 +107,132 @@ def check_accuracy(loader, model):
 
             scores = model(x)
             _, predictions = scores.max(1)
-            num_correct += (predictions == y).sum()
+            num_correct += (predictions == y).sum().item()
             num_samples += predictions.size(0)
 
     model.train()
     return num_correct / num_samples
 
 
-print(f"Accuracy on training set: {check_accuracy(train_loader, model)*100:.2f}")
-print(f"Accuracy on test set: {check_accuracy(test_loader, model)*100:.2f}")
+def load_or_train_model(model_path="mnist_cnn.pth", device=DEVICE):
+    model = build_model(device=device)
+
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
+        return model
+
+    train_loader, test_loader = load_mnist_data()
+    train_network(model, train_loader, device=device)
+    torch.save(model.state_dict(), model_path)
+
+    train_acc = check_accuracy(train_loader, model, device=device)
+    test_acc = check_accuracy(test_loader, model, device=device)
+    print(f"Accuracy on training set: {train_acc * 100:.2f}%")
+    print(f"Accuracy on test set: {test_acc * 100:.2f}%")
+
+    model.eval()
+    return model
+
+def get_model(model_path="mnist_cnn.pth", device=DEVICE):
+    global _CACHED_MODEL
+    if _CACHED_MODEL is None:
+        _CACHED_MODEL = load_or_train_model(model_path=model_path, device=device)
+    return _CACHED_MODEL
+
+# --- Image Processing & Prediction ---
+def _resize_with_padding(gray_image, size=28):
+    if cv2 is None:
+        raise RuntimeError("cv2 is required for number region preprocessing")
+
+    h, w = gray_image.shape[:2]
+    if h == 0 or w == 0:
+        raise ValueError("number_region must be a non-empty image array")
+
+    max_dim = max(h, w)
+    padded = np.zeros((max_dim, max_dim), dtype=gray_image.dtype)
+    y_offset = (max_dim - h) // 2
+    x_offset = (max_dim - w) // 2
+    padded[y_offset : y_offset + h, x_offset : x_offset + w] = gray_image
+
+    resized = cv2.resize(padded, (size, size), interpolation=cv2.INTER_AREA)
+    return resized
+
+def preprocess_number_region(number_region):
+    if cv2 is None:
+        raise RuntimeError("cv2 is required for number region preprocessing")
+
+    if number_region is None:
+        raise ValueError("number_region cannot be None")
+
+    if number_region.ndim == 3:
+        gray = cv2.cvtColor(number_region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = number_region
+
+    resized = _resize_with_padding(gray, size=28)
+    normalized = resized.astype(np.float32) / 255.0
+
+    # MNIST is white-on-black; invert if the input is black-on-white
+    if normalized.mean() > 0.5:
+        normalized = 1.0 - normalized
+
+    tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
+    return tensor
+
+def predict_digit_with_confidence(number_region, model, device=DEVICE):
+    model.eval()
+    tensor = preprocess_number_region(number_region).to(device)
+    with torch.no_grad():
+        logits = model(tensor)
+        probabilities = torch.softmax(logits, dim=1)
+        confidence, prediction = torch.max(probabilities, dim=1)
+    return int(prediction.item()), float(confidence.item())
+
+def _extract_digit_regions(number_region):
+    if cv2 is None:
+        raise RuntimeError("cv2 is required for digit extraction")
+
+    if number_region.ndim == 3:
+        gray = cv2.cvtColor(number_region, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = number_region
+
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if binary.mean() > 127:
+        binary = 255 - binary
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w * h < 20: # Noise filter
+            continue
+        boxes.append((x, y, w, h))
+
+    # Sort boxes from left to right
+    boxes.sort(key=lambda b: b[0])
+    digit_regions = [gray[y : y + h, x : x + w] for (x, y, w, h) in boxes]
+    return digit_regions
+
+def predict_number_from_region(number_region, model, device=DEVICE):
+    digit_regions = _extract_digit_regions(number_region)
+    if not digit_regions:
+        return 0
+
+    digits = []
+    for region in digit_regions:
+        digit, _ = predict_digit_with_confidence(region, model, device=device)
+        digits.append(str(digit))
+    
+    try:
+        value = int("".join(digits))
+        return value if 1 <= value <= 15 else 0
+    except ValueError:
+        return 0
+
+# --- Entry Point ---
+if __name__ == "__main__":
+    # This will train the model once and save it to 'mnist_cnn.pth'
+    trained_model = load_or_train_model()
+    print("Model ready for predictions.")
