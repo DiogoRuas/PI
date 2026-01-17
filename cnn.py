@@ -180,6 +180,7 @@ def preprocess_number_region(number_region):
     tensor = torch.from_numpy(normalized).unsqueeze(0).unsqueeze(0)
     return tensor
 
+
 def predict_digit_with_confidence(number_region, model, device=DEVICE):
     model.eval()
     tensor = preprocess_number_region(number_region).to(device)
@@ -216,20 +217,31 @@ def _extract_digit_regions(number_region):
     return digit_regions
 
 def predict_number_from_region(number_region, model, device=DEVICE):
+    value, _ = predict_number_with_confidence(number_region, model, device=device)
+    return value
+
+def predict_number_with_confidence(number_region, model, device=DEVICE):
     digit_regions = _extract_digit_regions(number_region)
     if not digit_regions:
-        return 0
+        return 0, 0.0
 
     digits = []
+    confidences = []
     for region in digit_regions:
-        digit, _ = predict_digit_with_confidence(region, model, device=device)
+        digit, confidence = predict_digit_with_confidence(region, model, device=device)
         digits.append(str(digit))
     
+        confidences.append(confidence)
+
     try:
         value = int("".join(digits))
-        return value if 1 <= value <= 15 else 0
     except ValueError:
-        return 0
+        return 0, 0.0
+
+    if not (1 <= value <= 15):
+        return 0, min(confidences) if confidences else 0.0
+
+    return value, min(confidences) if confidences else 0.0
 
 # --- Entry Point ---
 if __name__ == "__main__":
