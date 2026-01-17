@@ -3,7 +3,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 #G4
-def processamento_da_imagem(file_name):
+def processamento_da_imagem(file_name, identification_method="template"):
+    if identification_method not in {"template", "cnn"}:
+        raise ValueError("identification_method must be 'template' or 'cnn'")):
+    
     img_rgb = plt.imread(file_name)
     
     #Preparar Imagem
@@ -200,14 +203,18 @@ def processamento_da_imagem(file_name):
     mask_gold_clean = cv2.morphologyEx(mask_gold_clean, cv2.MORPH_OPEN, kernel, iterations=1)
 
 
-    # === CARREGAR TEMPLATES ===
-    templates = {}
-    for k in range(1, 16):
-        t = cv2.imread(f"15GameMasks/mask{k}.png", cv2.IMREAD_GRAYSCALE)
-        if t is None:
-            print(f"AVISO: Template {k} não encontrado!")
-            continue
-        templates[k] = t
+   cnn_model = None
+
+    if identification_method == "template":
+        # === CARREGAR TEMPLATES ===
+        for k in range(1, 16):
+            t = cv2.imread(f"15GameMasks/mask{k}.png", cv2.IMREAD_GRAYSCALE)
+            if t is None:
+                print(f"AVISO: Template {k} não encontrado!")
+                continue
+            templates[k] = t
+    else:
+        cnn_model = get_model()
 
     # === CRIAR IMAGEM PARA VISUALIZAÇÃO ===
     board_visualization = board.copy()
@@ -267,24 +274,38 @@ def processamento_da_imagem(file_name):
                 best_match_score = -1
                 best_match_num = 0
                 
-                for num, template in templates.items():
-                    # Redimensionar template para o tamanho da região
-                    if number_region.shape[0] > 0 and number_region.shape[1] > 0:
-                        template_resized = cv2.resize(template, 
-                                                    (number_region.shape[1], number_region.shape[0]),
-                                                    interpolation=cv2.INTER_AREA)
-                        
-                        # Usar TM_CCOEFF_NORMED (valores entre -1 e 1, quanto maior melhor)
-                        result = cv2.matchTemplate(number_region, template_resized, cv2.TM_CCOEFF_NORMED)
-                        score = result[0, 0]
-                        
-                        if score > best_match_score:
-                            best_match_score = score
-                            best_match_num = num
+                if identification_method == "template":
+                    # === TEMPLATE MATCHING ===
+                    best_match_score = -1
+                    best_match_num = 0
+                    
+                    for num, template in templates.items():
+                        # Redimensionar template para o tamanho da região
+                        if number_region.shape[0] > 0 and number_region.shape[1] > 0:
+                            template_resized = cv2.resize(template, 
+                                                        (number_region.shape[1], number_region.shape[0]),
+                                                        interpolation=cv2.INTER_AREA)
+                            
+                            # Usar TM_CCOEFF_NORMED (valores entre -1 e 1, quanto maior melhor)
+                            result = cv2.matchTemplate(number_region, template_resized, cv2.TM_CCOEFF_NORMED)
+                            score = result[0, 0]
+                            
+                            if score > best_match_score:
+                                best_match_score = score
+                                best_match_num = num
+
+                    detected_num = best_match_num
+                    detected_score = float(best_match_score)
+                else:
+                    detected_num, detected_score = predict_number_with_confidence(
+                        number_region,
+                        cnn_model,
+                    )
+                
                 
                 # Guardar na matriz
-                detected_board[row, col] = best_match_num
-                numbers_scores.append([best_match_num, float(best_match_score), row, col])
+                detected_board[row, col] = detected_num
+                numbers_scores.append([detected_num, float(detected_score), row, col])
                 
                 # Calcular centroide
                 cx = (x_min + x_max) // 2 + x1
@@ -306,12 +327,12 @@ def processamento_da_imagem(file_name):
                             (0, 255, 0), 2)
                 
                 # Adicionar número detectado
-                cv2.putText(board_visualization, f"{best_match_num}", 
+                cv2.putText(board_visualization, f"{detected_num}", 
                         (cx - 10, cy + 5), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                 
                 # Adicionar score (para debug)
-                cv2.putText(board_visualization, f"{best_match_score:.2f}", 
+                cv2.putText(board_visualization, f"{detected_score:.2f}", 
                         (x_abs, y_abs - 5), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
             else:
@@ -408,7 +429,10 @@ def processamento_da_imagem(file_name):
 
     plt.subplot(1, 4, 4)
     plt.imshow(board_visualization)
-    plt.title("Números Detectados via Template Matching")
+    title = "Números Detectados via Template Matching"
+    if identification_method == "cnn":
+        title = "Números Detectados via CNN"
+    plt.title(title)
     plt.axis("off")
 
     plt.tight_layout()
